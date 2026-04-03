@@ -1,0 +1,82 @@
+name: "AUR Deploy"
+description: "Deploy packages to the Arch User Repository (AUR)"
+branding:
+  icon: "terminal"
+  color: "blue"
+
+inputs:
+  pkgname:
+    description: "AUR package name"
+    required: true
+  pkgbuild:
+    description: "Path to PKGBUILD file"
+    required: true
+  srcinfo:
+    description: "Path to .SRCINFO file"
+    required: true
+  commit_username:
+    description: "Git commit author name"
+    required: true
+  commit_email:
+    description: "Git commit author email"
+    required: true
+  ssh_private_key:
+    description: "SSH private key for AUR access"
+    required: true
+  commit_message:
+    description: "Commit message"
+    required: false
+    default: "Update package"
+  version:
+    description: "Version string, used in default commit message"
+    required: false
+
+runs:
+  using: "composite"
+  steps:
+    - name: Setup SSH
+      shell: bash
+      run: |
+        mkdir -p ~/.ssh
+        echo "${{ inputs.ssh_private_key }}" > ~/.ssh/aur
+        chmod 600 ~/.ssh/aur
+        ssh-keyscan -t ed25519 aur.archlinux.org >> ~/.ssh/known_hosts 2>/dev/null
+        cat >> ~/.ssh/config <<EOF
+        Host aur.archlinux.org
+          IdentityFile ~/.ssh/aur
+          User aur
+        EOF
+
+    - name: Clone AUR repo
+      shell: bash
+      run: |
+        git clone ssh://aur@aur.archlinux.org/${{ inputs.pkgname }}.git /tmp/aur-repo
+
+    - name: Copy package files
+      shell: bash
+      run: |
+        cp "${{ inputs.pkgbuild }}" /tmp/aur-repo/PKGBUILD
+        cp "${{ inputs.srcinfo }}" /tmp/aur-repo/.SRCINFO
+
+    - name: Configure git user
+      shell: bash
+      run: |
+        cd /tmp/aur-repo
+        git config user.name "${{ inputs.commit_username }}"
+        git config user.email "${{ inputs.commit_email }}"
+
+    - name: Commit and push
+      shell: bash
+      run: |
+        cd /tmp/aur-repo
+        git add PKGBUILD .SRCINFO
+        if git diff --cached --quiet; then
+          echo "No changes to commit"
+        else
+          COMMIT_MSG="${{ inputs.commit_message }}"
+          if [ -n "${{ inputs.version }}" ] && [ "$COMMIT_MSG" = "Update package" ]; then
+            COMMIT_MSG="Update package to ${{ inputs.version }}"
+          fi
+          git commit -m "$COMMIT_MSG"
+          git push origin master
+        fi
