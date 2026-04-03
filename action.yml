@@ -9,10 +9,10 @@ inputs:
     description: "AUR package name"
     required: true
   pkgbuild:
-    description: "Path to PKGBUILD file"
+    description: "Path to PKGBUILD template file (pkgver and sha256sums will be auto-updated)"
     required: true
   srcinfo:
-    description: "Path to .SRCINFO file"
+    description: "Path to .SRCINFO template file (pkgver, source, and sha256sums will be auto-updated)"
     required: true
   commit_username:
     description: "Git commit author name"
@@ -24,16 +24,25 @@ inputs:
     description: "SSH private key for AUR access"
     required: true
   commit_message:
-    description: "Commit message"
-    required: false
-    default: "Update package"
-  version:
-    description: "Version string, used in default commit message"
+    description: "Commit message (default: 'Update to vX.Y.Z')"
     required: false
 
 runs:
   using: "composite"
   steps:
+    - name: Extract version and compute sha256
+      id: meta
+      shell: bash
+      run: |
+        VERSION="${GITHUB_REF_NAME#v}"
+        echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+        SHA=$(curl -sL "https://codeload.github.com/${{ github.repository }}/tar.gz/${GITHUB_REF_NAME}" | sha256sum | cut -d' ' -f1)
+        echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
+
+        echo ":: Version: $VERSION"
+        echo ":: SHA256: $SHA"
+
     - name: Setup SSH
       shell: bash
       run: |
@@ -52,11 +61,22 @@ runs:
       run: |
         git clone ssh://aur@aur.archlinux.org/${{ inputs.pkgname }}.git /tmp/aur-repo
 
-    - name: Copy package files
+    - name: Update and copy package files
       shell: bash
+      env:
+        PKG_VERSION: ${{ steps.meta.outputs.version }}
+        PKG_SHA256: ${{ steps.meta.outputs.sha256 }}
       run: |
+        # Update PKGBUILD
         cp "${{ inputs.pkgbuild }}" /tmp/aur-repo/PKGBUILD
+        sed -i "s/^pkgver=.*/pkgver=${PKG_VERSION}/" /tmp/aur-repo/PKGBUILD
+        sed -i "s/^sha256sums=.*/sha256sums=('${PKG_SHA256}')/" /tmp/aur-repo/PKGBUILD
+
+        # Update .SRCINFO (replace placeholder version and sha256)
+        OLD_VERSION=$(grep 'pkgver = ' "${{ inputs.srcinfo }}" | head -1 | sed 's/.*pkgver = //')
         cp "${{ inputs.srcinfo }}" /tmp/aur-repo/.SRCINFO
+        sed -i "s/${OLD_VERSION}/${PKG_VERSION}/g" /tmp/aur-repo/.SRCINFO
+        sed -i "s/sha256sums = .*/sha256sums = ${PKG_SHA256}/" /tmp/aur-repo/.SRCINFO
 
     - name: Configure git user
       shell: bash
@@ -67,16 +87,19 @@ runs:
 
     - name: Commit and push
       shell: bash
+      env:
+        PKG_VERSION: ${{ steps.meta.outputs.version }}
       run: |
         cd /tmp/aur-repo
         git add PKGBUILD .SRCINFO
         if git diff --cached --quiet; then
-          echo "No changes to commit"
+          echo ":: No changes to commit"
         else
           COMMIT_MSG="${{ inputs.commit_message }}"
-          if [ -n "${{ inputs.version }}" ] && [ "$COMMIT_MSG" = "Update package" ]; then
-            COMMIT_MSG="Update package to ${{ inputs.version }}"
+          if [ -z "$COMMIT_MSG" ]; then
+            COMMIT_MSG="Update to v${PKG_VERSION}"
           fi
           git commit -m "$COMMIT_MSG"
           git push origin master
+          echo ":: Pushed to AUR"
         fi
